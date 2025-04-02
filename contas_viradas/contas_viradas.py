@@ -6,35 +6,58 @@ from bs4 import BeautifulSoup
 def parse_balancete_html(html_content: str) -> pd.DataFrame:
     """
     Faz o parse do arquivo HTML do balancete, criando um DataFrame com as colunas relevantes.
-    
+
     Retorna um DataFrame com:
       - Código
       - Classificação
       - Descrição
       - Saldo Atual (Valor numérico)
       - Saldo Atual (D/C)
+      - Empresa
+      - CNPJ
+      - Período
     """
     soup = BeautifulSoup(html_content, "html.parser")
     rows = soup.find_all("tr")
-    data_rows = []
+    
+    # Extração dos dados do cabeçalho: Empresa, CNPJ e Período
+    empresa = None
+    cnpj = None
+    periodo = None
 
+    # Procura em todas as linhas do cabeçalho (com TH)
+    for row in rows:
+        ths = row.find_all("th")
+        for idx, th in enumerate(ths):
+            text = th.get_text(strip=True)
+            if text.startswith("Empresa"):
+                if len(ths) > idx + 1:
+                    empresa = ths[idx+1].get_text(strip=True)
+            elif text.startswith("C.N.P.J."):
+                if len(ths) > idx + 1:
+                    cnpj = ths[idx+1].get_text(strip=True)
+            elif text.startswith("Período"):
+                if len(ths) > idx + 1:
+                    periodo = ths[idx+1].get_text(strip=True)
+    
+    data_rows = []
+    # Processa somente as linhas que contêm células TD (supostamente os dados das contas)
     for row in rows:
         cols = row.find_all("td")
         cols_text = [c.get_text(strip=True) for c in cols]
-
-        # Checagem simples para evitar linhas sem dados relevantes
+        # Checa se há colunas suficientes para ser uma linha de conta
         if len(cols_text) >= 10:
-            codigo = cols_text[0].strip()       # Ex.: '7', '2658', etc.
-            classificacao = cols_text[2].strip()  # Ex.: '1.1.1.02.00006'
+            codigo = cols_text[0].strip()
+            classificacao = cols_text[2].strip()
 
-            # Localiza a descrição nas colunas 4..11
+            # Localiza a descrição nas colunas 4 a 11
             descricao = None
             for i in range(4, min(len(cols_text), 12)):
                 if cols_text[i]:
                     descricao = cols_text[i]
                     break
 
-            # Detectar saldo atual e seu indicador (D/C)
+            # Detecta saldo atual e seu indicador (D/C)
             saldo_atual_valor = ""
             saldo_atual_indicador = ""
             tail = cols_text[-5:]
@@ -42,7 +65,7 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                 item = item.strip()
                 if item.endswith("D") or item.endswith("C"):
                     saldo_atual_valor = item[:-1].strip()
-                    saldo_atual_indicador = item[-1]  # 'D' ou 'C'
+                    saldo_atual_indicador = item[-1]
                     break
 
             # Converter saldo em valor numérico
@@ -60,7 +83,10 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                     "Classificação": classificacao,
                     "Descrição": descricao,
                     "Saldo Atual (Valor)": numeric_value,
-                    "Saldo Atual (D/C)": saldo_atual_indicador
+                    "Saldo Atual (D/C)": saldo_atual_indicador,
+                    "Empresa": empresa,
+                    "CNPJ": cnpj,
+                    "Período": periodo
                 })
 
     df = pd.DataFrame(data_rows)
@@ -69,12 +95,11 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
 def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ajusta as colunas 'Virada', 'Motivo' e 'Avaliar' com base na regra:
-      - Se Classificação inicia com '1' e Saldo Atual (D/C) == 'C' => Virada
-      - Se Classificação inicia com '2' e Saldo Atual (D/C) == 'D' => Virada
-      - Caso contrário, marcar "Avaliar no detalhe"
-    
-    Além disso:
-      - Se a Descrição iniciar com "(-)", desconsiderar como conta virada.
+      - Se a Classificação inicia com '1' e o Saldo Atual (D/C) é 'C' => conta virada
+      - Se a Classificação inicia com '2' e o Saldo Atual (D/C) é 'D' => conta virada
+      - Caso contrário, marca "Avaliar no detalhe"
+
+    Além disso, se a Descrição iniciar com "(-)", a conta (redutora) não deve ser considerada virada.
     """
     df = df.copy()
 
@@ -84,11 +109,10 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df['Motivo'] = ""
     df['Avaliar'] = "Avaliar no detalhe"
 
-    # Condições de virada
+    # Condições para marcar como conta virada
     cond_ativo_c = df['Classificação'].str.startswith('1') & (df['Saldo Atual (D/C)'] == 'C')
     cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
 
-    # Marca as contas como viradas
     df.loc[cond_ativo_c, 'ViradaBool'] = True
     df.loc[cond_ativo_c, 'Virada'] = "Sim"
     df.loc[cond_ativo_c, 'Motivo'] = "Ativo (1) com saldo Credor (C)"
@@ -99,8 +123,8 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_passivo_d, 'Motivo'] = "Passivo (2) com saldo Devedor (D)"
     df.loc[cond_passivo_d, 'Avaliar'] = ""
 
-    # ----- NOVA REGRA -----
-    # Se a Descrição iniciar com "(-)", desconsiderar a marcação de virada
+    # ----- REGRA DE CONSIDERAÇÃO DE CONTAS REDUTORAS -----
+    # Se a Descrição iniciar com "(-)", a conta não deve ser considerada virada
     cond_redutora = df['Descrição'].str.startswith("(-)") & (df['ViradaBool'] == True)
     df.loc[cond_redutora, 'ViradaBool'] = False
     df.loc[cond_redutora, 'Virada'] = "Não"
@@ -141,7 +165,7 @@ def main():
             st.warning("Não foi possível encontrar dados de contas no arquivo enviado.")
             return
 
-        # Contagens de contas viradas
+        # Contagem de contas viradas
         df_viradas = df[df['ViradaBool'] == True]
         total_viradas = df_viradas.shape[0]
 
@@ -152,18 +176,15 @@ def main():
 
         st.write("---")
 
-        # Exibir tabela completa
+        # Exibe tabela completa
         st.subheader("Tabela Completa de Contas")
         styled_df = df.style.apply(
-            lambda row: [
-                'background-color: #ffcccc' if row['ViradaBool'] else ''
-                for _ in row
-            ],
+            lambda row: ['background-color: #ffcccc' if row['ViradaBool'] else '' for _ in row],
             axis=1
         )
         st.dataframe(styled_df)
 
-        # Filtro para mostrar apenas contas viradas
+        # Exibe tabela somente das contas viradas
         st.subheader("Tabela de Contas Viradas")
         if not df_viradas.empty:
             st.dataframe(df_viradas)
@@ -171,8 +192,7 @@ def main():
             st.info("Não há contas viradas para mostrar.")
 
         st.write("---")
-
-        # Exportações
+        # Botões para exportar os dados em Excel
         gerar_download_excel(df, "todas_contas.xlsx")
         if not df_viradas.empty:
             gerar_download_excel(df_viradas, "contas_viradas.xlsx")
