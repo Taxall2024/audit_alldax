@@ -5,15 +5,14 @@ from bs4 import BeautifulSoup
 
 def parse_balancete_html(html_content: str) -> pd.DataFrame:
     """
-    Faz o parse do arquivo HTML do balancete,
-    criando um DataFrame com as colunas relevantes.
-
+    Faz o parse do arquivo HTML do balancete, criando um DataFrame com as colunas relevantes.
+    
     Retorna um DataFrame com:
-        - Código
-        - Classificação
-        - Descrição
-        - Saldo Atual (Valor numérico)
-        - Saldo Atual (D/C)
+      - Código
+      - Classificação
+      - Descrição
+      - Saldo Atual (Valor numérico)
+      - Saldo Atual (D/C)
     """
 
     soup = BeautifulSoup(html_content, "html.parser")
@@ -26,9 +25,9 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
 
         # Checagem simples para evitar linhas que não tenham dados relevantes
         if len(cols_text) >= 10:
-            codigo = cols_text[0].strip()                # Ex.: '7', '2658', etc.
-            classificacao = cols_text[2].strip()         # Ex.: '1.1.1.02.00006'
-            
+            codigo = cols_text[0].strip()       # Ex.: '7', '2658', etc.
+            classificacao = cols_text[2].strip()  # Ex.: '1.1.1.02.00006'
+
             # Localiza a descrição nas colunas 4..11
             descricao = None
             for i in range(4, min(len(cols_text), 12)):
@@ -74,6 +73,10 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
       - Se Classificação inicia com '1' e Saldo Atual (D/C) == 'C' => Virada
       - Se Classificação inicia com '2' e Saldo Atual (D/C) == 'D' => Virada
       - Caso contrário, marcar 'Avaliar no detalhe'
+    
+    Além disso:
+      - Se a descrição contiver '(-)', desconsiderar como conta virada
+        (por ser conta redutora, não deve ser marcada como virada).
     """
     df = df.copy()
 
@@ -83,11 +86,11 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df['Motivo'] = ""
     df['Avaliar'] = "Avaliar no detalhe"
 
-    # Condições
+    # Condições de virada
     cond_ativo_c = df['Classificação'].str.startswith('1') & (df['Saldo Atual (D/C)'] == 'C')
     cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
 
-    # Atualiza as linhas que são viradas
+    # Classifica como virada
     df.loc[cond_ativo_c, 'ViradaBool'] = True
     df.loc[cond_ativo_c, 'Virada'] = "Sim"
     df.loc[cond_ativo_c, 'Motivo'] = "Ativo (1) com saldo Credor (C)"
@@ -97,6 +100,16 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_passivo_d, 'Virada'] = "Sim"
     df.loc[cond_passivo_d, 'Motivo'] = "Passivo (2) com saldo Devedor (D)"
     df.loc[cond_passivo_d, 'Avaliar'] = ""
+
+    # ----- NOVA REGRA -----
+    # Se a descrição conter "(-)", reverter a marcação de virada
+    # (é conta redutora, não deve ser considerada virada)
+    cond_redutora = df['Descrição'].str.contains("(-)", case=False, na=False) & (df['ViradaBool'] == True)
+
+    df.loc[cond_redutora, 'ViradaBool'] = False
+    df.loc[cond_redutora, 'Virada'] = "Não"
+    df.loc[cond_redutora, 'Motivo'] = ""
+    df.loc[cond_redutora, 'Avaliar'] = "Avaliar no detalhe"
 
     return df
 
