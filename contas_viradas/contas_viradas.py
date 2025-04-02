@@ -14,7 +14,6 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
       - Saldo Atual (Valor numérico)
       - Saldo Atual (D/C)
     """
-
     soup = BeautifulSoup(html_content, "html.parser")
     rows = soup.find_all("tr")
     data_rows = []
@@ -23,7 +22,7 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
         cols = row.find_all("td")
         cols_text = [c.get_text(strip=True) for c in cols]
 
-        # Checagem simples para evitar linhas que não tenham dados relevantes
+        # Checagem simples para evitar linhas sem dados relevantes
         if len(cols_text) >= 10:
             codigo = cols_text[0].strip()       # Ex.: '7', '2658', etc.
             classificacao = cols_text[2].strip()  # Ex.: '1.1.1.02.00006'
@@ -72,11 +71,10 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     Ajusta as colunas 'Virada', 'Motivo' e 'Avaliar' com base na regra:
       - Se Classificação inicia com '1' e Saldo Atual (D/C) == 'C' => Virada
       - Se Classificação inicia com '2' e Saldo Atual (D/C) == 'D' => Virada
-      - Caso contrário, marcar 'Avaliar no detalhe'
+      - Caso contrário, marcar "Avaliar no detalhe"
     
     Além disso:
-      - Se a descrição contiver '(-)', desconsiderar como conta virada
-        (por ser conta redutora, não deve ser marcada como virada).
+      - Se a Descrição iniciar com "(-)", desconsiderar como conta virada.
     """
     df = df.copy()
 
@@ -90,7 +88,7 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     cond_ativo_c = df['Classificação'].str.startswith('1') & (df['Saldo Atual (D/C)'] == 'C')
     cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
 
-    # Classifica como virada
+    # Marca as contas como viradas
     df.loc[cond_ativo_c, 'ViradaBool'] = True
     df.loc[cond_ativo_c, 'Virada'] = "Sim"
     df.loc[cond_ativo_c, 'Motivo'] = "Ativo (1) com saldo Credor (C)"
@@ -102,10 +100,8 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_passivo_d, 'Avaliar'] = ""
 
     # ----- NOVA REGRA -----
-    # Se a descrição conter "(-)", reverter a marcação de virada
-    # (é conta redutora, não deve ser considerada virada)
-    cond_redutora = df['Descrição'].str.contains("(-)", case=False, na=False) & (df['ViradaBool'] == True)
-
+    # Se a Descrição iniciar com "(-)", desconsiderar a marcação de virada
+    cond_redutora = df['Descrição'].str.startswith("(-)") & (df['ViradaBool'] == True)
     df.loc[cond_redutora, 'ViradaBool'] = False
     df.loc[cond_redutora, 'Virada'] = "Não"
     df.loc[cond_redutora, 'Motivo'] = ""
