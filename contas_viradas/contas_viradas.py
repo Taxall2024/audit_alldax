@@ -25,7 +25,6 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
     cnpj = None
     periodo = None
 
-    # Procura em todas as linhas do cabeçalho (com TH)
     for row in rows:
         ths = row.find_all("th")
         for idx, th in enumerate(ths):
@@ -41,7 +40,6 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                     periodo = ths[idx+1].get_text(strip=True)
     
     data_rows = []
-    # Processa somente as linhas que contêm células TD (supostamente os dados das contas)
     for row in rows:
         cols = row.find_all("td")
         cols_text = [c.get_text(strip=True) for c in cols]
@@ -50,14 +48,14 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
             codigo = cols_text[0].strip()
             classificacao = cols_text[2].strip()
 
-            # Localiza a descrição nas colunas 4 a 11
+            # Localiza a descrição nas colunas 4..11
             descricao = None
             for i in range(4, min(len(cols_text), 12)):
                 if cols_text[i]:
                     descricao = cols_text[i]
                     break
 
-            # Detecta saldo atual e seu indicador (D/C)
+            # Detectar saldo atual e seu indicador (D/C)
             saldo_atual_valor = ""
             saldo_atual_indicador = ""
             tail = cols_text[-5:]
@@ -65,7 +63,7 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                 item = item.strip()
                 if item.endswith("D") or item.endswith("C"):
                     saldo_atual_valor = item[:-1].strip()
-                    saldo_atual_indicador = item[-1]
+                    saldo_atual_indicador = item[-1]  # 'D' ou 'C'
                     break
 
             # Converter saldo em valor numérico
@@ -94,13 +92,17 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
 
 def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ajusta as colunas 'Virada', 'Motivo' e 'Avaliar' com base na regra:
-      - Se a Classificação inicia com '1' e o Saldo Atual (D/C) é 'C' => conta virada
-      - Se a Classificação inicia com '2' e o Saldo Atual (D/C) é 'D' => conta virada
-      - Caso contrário, marca "Avaliar no detalhe"
+    Ajusta as colunas 'Virada', 'Motivo' e 'Avaliar' com base nas regras:
+      1. Se a Classificação inicia com '1' e o Saldo Atual (D/C) é 'C' => conta virada
+      2. Se a Classificação inicia com '2' e o Saldo Atual (D/C) é 'D' => conta virada
+      3. Bloco 3 (sem '(-)' redutoras):
+         - Contas 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
+         - Contas 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
+      - Caso contrário, marca "Avaliar no detalhe".
 
-    Além disso, se a Descrição iniciar com "(-)", a conta (redutora) não deve ser considerada virada.
+    (A regra anterior de redutoras "(-)" foi removida a pedido.)
     """
+
     df = df.copy()
 
     # Cria as colunas padrão
@@ -109,27 +111,40 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df['Motivo'] = ""
     df['Avaliar'] = "Avaliar no detalhe"
 
-    # Condições para marcar como conta virada
+    # 1. Ativo + Credor
     cond_ativo_c = df['Classificação'].str.startswith('1') & (df['Saldo Atual (D/C)'] == 'C')
-    cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
-
     df.loc[cond_ativo_c, 'ViradaBool'] = True
     df.loc[cond_ativo_c, 'Virada'] = "Sim"
     df.loc[cond_ativo_c, 'Motivo'] = "Ativo (1) com saldo Credor (C)"
     df.loc[cond_ativo_c, 'Avaliar'] = ""
 
+    # 2. Passivo + Devedor
+    cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
     df.loc[cond_passivo_d, 'ViradaBool'] = True
     df.loc[cond_passivo_d, 'Virada'] = "Sim"
     df.loc[cond_passivo_d, 'Motivo'] = "Passivo (2) com saldo Devedor (D)"
     df.loc[cond_passivo_d, 'Avaliar'] = ""
 
-    # ----- REGRA DE CONSIDERAÇÃO DE CONTAS REDUTORAS -----
-    # Se a Descrição iniciar com "(-)", a conta não deve ser considerada virada
-    cond_redutora = df['Descrição'].str.startswith("(-)") & (df['ViradaBool'] == True)
-    df.loc[cond_redutora, 'ViradaBool'] = False
-    df.loc[cond_redutora, 'Virada'] = "Não"
-    df.loc[cond_redutora, 'Motivo'] = ""
-    df.loc[cond_redutora, 'Avaliar'] = "Avaliar no detalhe"
+    # 3. Regras Bloco 3
+    #   - Contas 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
+    #   - Contas 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
+
+    bloco3_devedor = ['3.1.1', '3.2.2.03', '3.2.4', '3.2.5']
+    bloco3_credor = ['3.1.2', '3.1.7', '3.2.2.01', '3.2.3']
+
+    cond_bloco3_dev = df['Classificação'].isin(bloco3_devedor) & (df['Saldo Atual (D/C)'] == 'D')
+    cond_bloco3_cred = df['Classificação'].isin(bloco3_credor) & (df['Saldo Atual (D/C)'] == 'C')
+
+    # Marca como virada
+    df.loc[cond_bloco3_dev, 'ViradaBool'] = True
+    df.loc[cond_bloco3_dev, 'Virada'] = "Sim"
+    df.loc[cond_bloco3_dev, 'Motivo'] = "Bloco 3: Devedora"
+    df.loc[cond_bloco3_dev, 'Avaliar'] = ""
+
+    df.loc[cond_bloco3_cred, 'ViradaBool'] = True
+    df.loc[cond_bloco3_cred, 'Virada'] = "Sim"
+    df.loc[cond_bloco3_cred, 'Motivo'] = "Bloco 3: Credora"
+    df.loc[cond_bloco3_cred, 'Avaliar'] = ""
 
     return df
 
@@ -165,7 +180,6 @@ def main():
             st.warning("Não foi possível encontrar dados de contas no arquivo enviado.")
             return
 
-        # Contagem de contas viradas
         df_viradas = df[df['ViradaBool'] == True]
         total_viradas = df_viradas.shape[0]
 
@@ -192,7 +206,7 @@ def main():
             st.info("Não há contas viradas para mostrar.")
 
         st.write("---")
-        # Botões para exportar os dados em Excel
+        # Botões para exportar
         gerar_download_excel(df, "todas_contas.xlsx")
         if not df_viradas.empty:
             gerar_download_excel(df_viradas, "contas_viradas.xlsx")
