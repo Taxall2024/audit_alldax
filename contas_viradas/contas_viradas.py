@@ -79,7 +79,7 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                 data_rows.append({
                     "Código": codigo,
                     "Classificação": classificacao,
-                    "Descrição": descricao,
+                    "Descrição": descricao if descricao else "",
                     "Saldo Atual (Valor)": numeric_value,
                     "Saldo Atual (D/C)": saldo_atual_indicador,
                     "Empresa": empresa,
@@ -88,9 +88,10 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                 })
 
     df = pd.DataFrame(data_rows)
-    # Preenchendo valores vazios em 'Descrição' com string vazia
+    # Preenche valores vazios em 'Descrição' com string vazia
     df['Descrição'] = df['Descrição'].fillna("")
     return df
+
 
 def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -98,9 +99,12 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
       1. Se a Classificação inicia com '1' e o Saldo Atual (D/C) é 'C' => conta virada
       2. Se a Classificação inicia com '2' e o Saldo Atual (D/C) é 'D' => conta virada
       3. Contas do bloco 3 (iniciando com ...):
-         - 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D' e descrição não inicia com (-)
-         - 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C' e descrição não inicia com (-)
-      - Caso contrário, marca "Avaliar no detalhe".
+         - 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D' e descrição não inicia com "(-)"
+         - 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C' e descrição não inicia com "(-)"
+      4. Se a conta foi marcada como virada, porém a descrição CONTÉM "(-)"
+         em qualquer posição, então "desvirar" (não é conta virada).
+
+      Caso a conta não se encaixe em nenhuma das regras acima, marca "Avaliar no detalhe".
     """
 
     df = df.copy()
@@ -131,9 +135,9 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[cond_passivo_d, 'Motivo'] = "Passivo (2) com saldo Devedor (D)"
     df.loc[cond_passivo_d, 'Avaliar'] = ""
 
-    # 3. Regras do bloco 3 (verificando que a descrição não inicia com (-))
-    #   - Contas que iniciem com 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
-    #   - Contas que iniciem com 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
+    # 3. Regras do bloco 3
+    #    - Contas que iniciem com 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D', descrição não inicia com "(-)"
+    #    - Contas que iniciem com 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C', descrição não inicia com "(-)"
 
     cond_bloco3_dev = (
         (
@@ -143,7 +147,7 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
             df['Classificação'].str.startswith('3.2.5')
         ) &
         (df['Saldo Atual (D/C)'] == 'D') &
-        ~(df['Descrição'].str.startswith("(-)"))
+        ~df['Descrição'].str.startswith("(-)")
     )
     df.loc[cond_bloco3_dev, 'ViradaBool'] = True
     df.loc[cond_bloco3_dev, 'Virada'] = "Sim"
@@ -158,14 +162,28 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
             df['Classificação'].str.startswith('3.2.3')
         ) &
         (df['Saldo Atual (D/C)'] == 'C') &
-        ~(df['Descrição'].str.startswith("(-)"))
+        ~df['Descrição'].str.startswith("(-)")
     )
     df.loc[cond_bloco3_cred, 'ViradaBool'] = True
     df.loc[cond_bloco3_cred, 'Virada'] = "Sim"
     df.loc[cond_bloco3_cred, 'Motivo'] = "Bloco 3: Credora"
     df.loc[cond_bloco3_cred, 'Avaliar'] = ""
 
+    # 4. Se a conta foi marcada como virada, mas a descrição CONTÉM "(-)"
+    #    em qualquer posição, então "desvirar":
+    cond_reverter = (
+        (df['ViradaBool'] == True) &
+        df['Descrição'].str.contains(r"\(-\)", na=False)
+        # Regex \(-\) ou uma string literal "(-)" se preferir sem regex:
+        #  .contains("(-)", na=False) 
+    )
+    df.loc[cond_reverter, 'ViradaBool'] = False
+    df.loc[cond_reverter, 'Virada'] = "Não"
+    df.loc[cond_reverter, 'Motivo'] = ""
+    df.loc[cond_reverter, 'Avaliar'] = "Avaliar no detalhe"
+
     return df
+
 
 def gerar_download_excel(df: pd.DataFrame, nome_arquivo: str) -> None:
     """
@@ -182,6 +200,7 @@ def gerar_download_excel(df: pd.DataFrame, nome_arquivo: str) -> None:
         file_name=nome_arquivo,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 
 def main():
     st.title("Verificador de Contas Viradas em Balancete")
