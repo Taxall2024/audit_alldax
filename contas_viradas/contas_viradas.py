@@ -208,7 +208,7 @@ def main():
     uploaded_file = st.file_uploader("Arraste o arquivo HTML do balancete aqui", type=["htm", "html"])
     
     if uploaded_file is not None:
-        html_content = uploaded_file.read().decode('utf-8', errors='ignore')
+        html_content = uploaded_file.read().decode('utf-8')
         
         with st.spinner("Processando balancete..."):
             df = parse_balancete_html(html_content)
