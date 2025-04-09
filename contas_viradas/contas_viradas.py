@@ -55,7 +55,7 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                     descricao = cols_text[i]
                     break
 
-            # Detectar saldo atual e seu indicador (D/C)
+            # Detecta saldo atual e seu indicador (D/C)
             saldo_atual_valor = ""
             saldo_atual_indicador = ""
             tail = cols_text[-5:]
@@ -88,6 +88,8 @@ def parse_balancete_html(html_content: str) -> pd.DataFrame:
                 })
 
     df = pd.DataFrame(data_rows)
+    # Preenchendo valores vazios em 'Descrição' com string vazia
+    df['Descrição'] = df['Descrição'].fillna("")
     return df
 
 def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
@@ -95,12 +97,10 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     Ajusta as colunas 'Virada', 'Motivo' e 'Avaliar' com base nas regras:
       1. Se a Classificação inicia com '1' e o Saldo Atual (D/C) é 'C' => conta virada
       2. Se a Classificação inicia com '2' e o Saldo Atual (D/C) é 'D' => conta virada
-      3. Bloco 3 (sem '(-)' redutoras):
-         - Contas 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
-         - Contas 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
+      3. Contas do bloco 3 (iniciando com ...):
+         - 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D' e descrição não inicia com (-)
+         - 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C' e descrição não inicia com (-)
       - Caso contrário, marca "Avaliar no detalhe".
-
-    (A regra anterior de redutoras "(-)" foi removida a pedido.)
     """
 
     df = df.copy()
@@ -112,35 +112,54 @@ def marcar_contas_viradas(df: pd.DataFrame) -> pd.DataFrame:
     df['Avaliar'] = "Avaliar no detalhe"
 
     # 1. Ativo + Credor
-    cond_ativo_c = df['Classificação'].str.startswith('1') & (df['Saldo Atual (D/C)'] == 'C')
+    cond_ativo_c = (
+        df['Classificação'].str.startswith('1') &
+        (df['Saldo Atual (D/C)'] == 'C')
+    )
     df.loc[cond_ativo_c, 'ViradaBool'] = True
     df.loc[cond_ativo_c, 'Virada'] = "Sim"
     df.loc[cond_ativo_c, 'Motivo'] = "Ativo (1) com saldo Credor (C)"
     df.loc[cond_ativo_c, 'Avaliar'] = ""
 
     # 2. Passivo + Devedor
-    cond_passivo_d = df['Classificação'].str.startswith('2') & (df['Saldo Atual (D/C)'] == 'D')
+    cond_passivo_d = (
+        df['Classificação'].str.startswith('2') &
+        (df['Saldo Atual (D/C)'] == 'D')
+    )
     df.loc[cond_passivo_d, 'ViradaBool'] = True
     df.loc[cond_passivo_d, 'Virada'] = "Sim"
     df.loc[cond_passivo_d, 'Motivo'] = "Passivo (2) com saldo Devedor (D)"
     df.loc[cond_passivo_d, 'Avaliar'] = ""
 
-    # 3. Regras Bloco 3
-    #   - Contas 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
-    #   - Contas 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
+    # 3. Regras do bloco 3 (verificando que a descrição não inicia com (-))
+    #   - Contas que iniciem com 3.1.1, 3.2.2.03, 3.2.4, 3.2.5 => saldo 'D'
+    #   - Contas que iniciem com 3.1.2, 3.1.7, 3.2.2.01, 3.2.3 => saldo 'C'
 
-    bloco3_devedor = ['3.1.1', '3.2.2.03', '3.2.4', '3.2.5']
-    bloco3_credor = ['3.1.2', '3.1.7', '3.2.2.01', '3.2.3']
-
-    cond_bloco3_dev = df['Classificação'].isin(bloco3_devedor) & (df['Saldo Atual (D/C)'] == 'D')
-    cond_bloco3_cred = df['Classificação'].isin(bloco3_credor) & (df['Saldo Atual (D/C)'] == 'C')
-
-    # Marca como virada
+    cond_bloco3_dev = (
+        (
+            df['Classificação'].str.startswith('3.1.1') |
+            df['Classificação'].str.startswith('3.2.2.03') |
+            df['Classificação'].str.startswith('3.2.4') |
+            df['Classificação'].str.startswith('3.2.5')
+        ) &
+        (df['Saldo Atual (D/C)'] == 'D') &
+        ~(df['Descrição'].str.startswith("(-)"))
+    )
     df.loc[cond_bloco3_dev, 'ViradaBool'] = True
     df.loc[cond_bloco3_dev, 'Virada'] = "Sim"
     df.loc[cond_bloco3_dev, 'Motivo'] = "Bloco 3: Devedora"
     df.loc[cond_bloco3_dev, 'Avaliar'] = ""
 
+    cond_bloco3_cred = (
+        (
+            df['Classificação'].str.startswith('3.1.2') |
+            df['Classificação'].str.startswith('3.1.7') |
+            df['Classificação'].str.startswith('3.2.2.01') |
+            df['Classificação'].str.startswith('3.2.3')
+        ) &
+        (df['Saldo Atual (D/C)'] == 'C') &
+        ~(df['Descrição'].str.startswith("(-)"))
+    )
     df.loc[cond_bloco3_cred, 'ViradaBool'] = True
     df.loc[cond_bloco3_cred, 'Virada'] = "Sim"
     df.loc[cond_bloco3_cred, 'Motivo'] = "Bloco 3: Credora"
